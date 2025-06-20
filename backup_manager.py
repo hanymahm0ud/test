@@ -1,21 +1,46 @@
 import sys
 import random
 import string
-import os,io
+import os
+import io
+import sqlite3
 import json
+import openpyxl
+import ctypes
+import pymysql
+
+
+from openpyxl.styles import Font, PatternFill, Alignment
+from PyQt5.QtWidgets import QMessageBox
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QTableWidget,
     QTableWidgetItem, QPushButton, QLabel, QFrame, QHeaderView, QDialog,
     QFormLayout, QLineEdit, QComboBox, QDateEdit, QMessageBox, QDialogButtonBox,
-    QTextEdit, QGroupBox, QGridLayout, QListWidget, QInputDialog, QCheckBox,QListWidgetItem)
+    QTextEdit, QGroupBox, QGridLayout, QListWidget, QCheckBox,QListWidgetItem,QFileDialog)
 
 from PyQt5.QtPrintSupport import QPrintDialog, QPrinter
-from PyQt5.QtCore import QRect
-from PyQt5.QtCore import Qt, QDate
-from PyQt5.QtGui import QFont, QIcon, QColor, QDoubleValidator, QIntValidator, QPainter
+from PyQt5.QtCore import Qt, QDate,QRect
+from PyQt5.QtGui import QFont, QColor, QDoubleValidator, QIntValidator, QPainter,QIcon
+
 from datetime import datetime, timedelta
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
-sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
+
+if os.name == 'nt':  # Windows
+    myappid = 'mycompany.myproduct.subproduct.version'  # أي معرف فريد
+    ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
+    
+if hasattr(sys, 'frozen'):
+    # إذا كان البرنامج مجمع (exe)
+    try:
+        if sys.stdout:
+            sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+        if sys.stderr:
+            sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
+    except (AttributeError, IOError):
+        pass
+else:
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
+
 class LoginDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -210,9 +235,9 @@ class LoginDialog(QDialog):
     def validate_login(self):
         username = self.username.text()
         password = self.password.text()
-        conn = sqlite3.connect(self.parent_app.db_file)
+        conn = pymysql.connect(self.parent_app.db_file)
         cursor = conn.cursor()
-        cursor.execute("SELECT username, password, type, permissions FROM users WHERE username = ?", (username,))
+        cursor.execute("SELECT username, password, type, permissions FROM users WHERE username = %s", (username,))
         user = cursor.fetchone()
         conn.close()
         if user and user[1] == password:
@@ -231,6 +256,13 @@ class UserManagementDialog(QDialog):
     def __init__(self, users, parent=None):
         super().__init__(parent)
         self.users = users
+        self.parent_app = parent
+        self.db_file = {
+             "host": "localhost",
+            "user": "hany",
+            "password": "hany",
+            "database": "transport_db"
+        }        
         self.setWindowTitle('إدارة المستخدمين')
         self.setModal(True)
         self.resize(600, 500)
@@ -270,20 +302,32 @@ class UserManagementDialog(QDialog):
             
     def save_users_data(self):
         """حفظ بيانات المستخدمين في قاعدة البيانات"""
-        conn = sqlite3.connect(self.db_file)
-        cursor = conn.cursor()
-        
-        cursor.execute("DELETE FROM users")
-        
-        for user in self.users:
-            cursor.execute(
-                "INSERT INTO users (username, password, type, permissions) VALUES (?, ?, ?, ?)",
-                (user['username'], user['password'], 
-                user['type'], json.dumps(user['permissions']))
-            )
-        
-        conn.commit()
-        conn.close()
+        try:
+            conn = pymysql.connect(**self.db_file)
+            cursor = conn.cursor()
+            
+            cursor.execute("DELETE FROM users")
+            
+            for user in self.users:
+                cursor.execute(
+                    "INSERT INTO users (username, password, type, permissions) VALUES (%s, %s, %s, %s)",
+                    (user['username'], user['password'], 
+                    user['type'], json.dumps(user['permissions']))
+                )
+            
+            conn.commit()
+            conn.close()
+            QMessageBox.information(self, 'نجح', 'تم حفظ بيانات المستخدمين بنجاح!')
+            
+        except sqlite3.Error as e:
+            print(f"خطأ في قاعدة البيانات: {str(e)}")
+            QMessageBox.critical(self, 'خطأ', f'حدث خطأ في قاعدة البيانات: {str(e)}')
+            if 'conn' in locals():
+                conn.rollback()
+                conn.close()
+        except Exception as e:
+            print(f"خطأ غير متوقع: {str(e)}")
+            QMessageBox.critical(self, 'خطأ', f'حدث خطأ غير متوقع: {str(e)}')
 
     def add_user(self):
         dialog = UserEditDialog(self.users, self)
@@ -397,7 +441,13 @@ class UserEditDialog(QDialog):
 class CountryManagerDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.db_file = "shipping_management.db"
+        
+        self.db_file = {
+             "host": "localhost",
+            "user": "hany",
+            "password": "hany",
+            "database": "transport_db"
+        } 
         self.countries_data = parent.load_countries_data()
         self.parent_app = parent
         self.drivers_data = parent.drivers_data
@@ -540,50 +590,7 @@ class CountryManagerDialog(QDialog):
             drivers_text = ", ".join(country['allowed_drivers']) if country['allowed_drivers'] else "لا يوجد"
             self.countries_table.setItem(row, 1, QTableWidgetItem(drivers_text))
 
-    def save_countries_data(self):
-        """حفظ بيانات الدول في قاعدة البيانات"""
-        try:
-            print("جاري اتصال بقاعدة البيانات...")  # رسالة debug
-            conn = sqlite3.connect(self.db_file)
-            cursor = conn.cursor()
-            
-            print("جاري إنشاء/تحديث جدول الدول...")  # رسالة debug
-            
-            # إنشاء الجدول إذا لم يكن موجوداً
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS countries (
-                    name TEXT PRIMARY KEY,
-                    allowed_drivers TEXT
-                )
-            """)
-            
-            print("جاري حذف البيانات القديمة...")  # رسالة debug
-            cursor.execute("DELETE FROM countries")
-            
-            print("جاري إدراج البيانات الجديدة...")  # رسالة debug
-            for country in self.countries_data:
-                cursor.execute(
-                    "INSERT INTO countries (name, allowed_drivers) VALUES (?, ?)",
-                    (country['name'], json.dumps(country['allowed_drivers'])))
-            
-            conn.commit()
-            conn.close()
-            print("تم حفظ بيانات الدول بنجاح في قاعدة البيانات")  # رسالة debug
-            
-        except sqlite3.Error as e:
-            print(f"خطأ في sqlite: {str(e)}")  # رسالة debug
-            QMessageBox.critical(self, 'خطأ', f'حدث خطأ في قاعدة البيانات: {str(e)}')
-            if 'conn' in locals():
-                conn.rollback()
-                conn.close()
-                
-        except json.JSONDecodeError as e:
-            print(f"خطأ في تحويل JSON: {str(e)}")  # رسالة debug
-            QMessageBox.critical(self, 'خطأ', f'حدث خطأ في تحويل بيانات السائقين: {str(e)}')
-            
-        except Exception as e:
-            print(f"خطأ غير متوقع: {str(e)}")  # رسالة debug
-            QMessageBox.critical(self, 'خطأ', f'حدث خطأ غير متوقع: {str(e)}')
+    
     def add_country(self):
         dialog = AddCountryDialog(self.drivers_data, self)
         if dialog.exec_() == QDialog.Accepted:
@@ -596,6 +603,7 @@ class CountryManagerDialog(QDialog):
                     
                 self.countries.append(country_data)
                 self.update_countries_table()
+                self.save_countries_data()  # Save to database immediately
                 QMessageBox.information(self, 'نجح', 'تم إضافة الدولة بنجاح!')
 
     def edit_country(self):
@@ -622,6 +630,7 @@ class CountryManagerDialog(QDialog):
                         
                     self.countries[selected_row] = new_data
                     self.update_countries_table()
+                    self.save_countries_data()
                     QMessageBox.information(self, 'نجح', 'تم تعديل الدولة بنجاح!')
 
     def delete_country(self):
@@ -653,7 +662,48 @@ class CountryManagerDialog(QDialog):
             if reply == QMessageBox.Yes:
                 del self.countries[selected_row]
                 self.update_countries_table()
+                self.save_countries_data()  # Save to database immediately
                 QMessageBox.information(self, 'نجح', 'تم حذف الدولة بنجاح!')
+    def save_countries_data(self):
+        """حفظ بيانات الدول في قاعدة البيانات"""
+        try:
+            print("جاري اتصال بقاعدة البيانات...")
+            conn = pymysql.connect(**self.db_file)
+            cursor = conn.cursor()
+            
+            
+            print("جاري إنشاء/تحديث جدول الدول...")
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS countries (
+                    name TEXT PRIMARY KEY,
+                    allowed_drivers TEXT
+                )
+            """)
+            
+            print("جاري حذف البيانات القديمة...")
+            cursor.execute("DELETE FROM countries")
+            
+            print("جاري إدراج البيانات الجديدة...")
+            for country in self.countries:  # تغيير من self.countries_data إلى self.countries
+                cursor.execute(
+                    "INSERT INTO countries (name, allowed_drivers) VALUES (%s, %s)",
+                    (country['name'], json.dumps(country['allowed_drivers']))
+                )
+            
+            conn.commit()
+            conn.close()
+            print("تم حفظ بيانات الدول بنجاح في قاعدة البيانات")
+            
+        except sqlite3.Error as e:
+            print(f"خطأ في sqlite: {str(e)}")
+            QMessageBox.critical(self, 'خطأ', f'حدث خطأ في قاعدة البيانات: {str(e)}')
+            if 'conn' in locals():
+                conn.rollback()
+                conn.close()
+                
+        except Exception as e:
+            print(f"خطأ غير متوقع: {str(e)}")
+            QMessageBox.critical(self, 'خطأ', f'حدث خطأ غير متوقع: {str(e)}')
 
     def accept(self):
         """حفظ التغييرات عند الضغط على موافق"""
@@ -664,23 +714,22 @@ class CountryManagerDialog(QDialog):
                 QMessageBox.warning(self, 'خطأ', 'يوجد دول بأسماء مكررة!')
                 return
                 
-            print("جاري حفظ بيانات الدول...")  # رسالة debug
-            
-            # حفظ البيانات في التطبيق الرئيسي
-            self.parent_app.countries_data = self.countries
-            self.parent_app.countries = [c['name'] for c in self.countries]
+            print("جاري حفظ بيانات الدول...")
             
             # حفظ في قاعدة البيانات
             self.save_countries_data()
             
-            print("تم حفظ بيانات الدول بنجاح")  # رسالة debug
+            # حفظ البيانات في التطبيق الرئيسي
+            self.parent_app.countries_data = self.countries.copy()
+            self.parent_app.countries = [c['name'] for c in self.countries]
             
+            print("تم حفظ بيانات الدول بنجاح")
             super().accept()
             
         except Exception as e:
-            print(f"حدث خطأ أثناء حفظ الدول: {str(e)}")  # رسالة debug
+            print(f"حدث خطأ أثناء حفظ الدول: {str(e)}")
             QMessageBox.critical(self, 'خطأ', f'حدث خطأ أثناء الحفظ: {str(e)}')
-        # لا نستدعي super().accept() هنا حتى لا تغلق النافذة عند وجود خطأ
+
 
 class AddCountryDialog(QDialog):
     def __init__(self, drivers_data, parent=None):
@@ -739,6 +788,7 @@ class AddCountryDialog(QDialog):
             'name': self.name.text().strip(),
             'allowed_drivers': selected_drivers
         }
+    
 class AddDriverDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -749,28 +799,62 @@ class AddDriverDialog(QDialog):
         
     def setupUI(self):
         layout = QVBoxLayout(self)
-        form_group = QGroupBox("بيانات السائق")
-        form_layout = QFormLayout(form_group)
         
+        # إنشاء مجموعة بيانات السائق
+        form_group = QGroupBox("بيانات السائق")
+        grid_layout = QGridLayout(form_group)
+        
+        # إنشاء الحقول مع تحديد مواقعها في الGrid
         self.name = QLineEdit()
-        form_layout.addRow("اسم السائق:", self.name)
+        name_label = QLabel("اسم السائق:*")  # إضافة علامة * للحقل الإلزامي
+        name_label.setStyleSheet("color: #444; font-weight: bold;")  # تنسيق العنوان
+        grid_layout.addWidget(name_label, 0, 1)
+        grid_layout.addWidget(self.name, 0, 0)
         
         self.address = QLineEdit()
-        form_layout.addRow("العنوان:", self.address)
+        grid_layout.addWidget(QLabel("العنوان:"), 1, 1)
+        grid_layout.addWidget(self.address, 1, 0)
         
         self.age = QLineEdit()
         self.age.setValidator(QIntValidator(18, 70))
-        form_layout.addRow("السن:", self.age)
+        grid_layout.addWidget(QLabel("السن:"), 2, 1)
+        grid_layout.addWidget(self.age, 2, 0)
         
         self.national_id = QLineEdit()
-        form_layout.addRow("الرقم القومي:", self.national_id)
+        grid_layout.addWidget(QLabel("الرقم القومي:"), 3, 1)
+        grid_layout.addWidget(self.national_id, 3, 0)
+        
+        # جعل عمود الإدخال أكثر اتساعاً
+        grid_layout.setColumnStretch(0, 2)
+        grid_layout.setColumnStretch(1, 1)
         
         layout.addWidget(form_group)
-        button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        button_box.accepted.connect(self.accept)
-        button_box.rejected.connect(self.reject)
-        layout.addWidget(button_box)
         
+        button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        button_box.accepted.connect(self.validate_and_accept)  # تغيير الاتصال إلى دالة التحقق
+        button_box.rejected.connect(self.reject)
+        
+        # تغيير نص الأزرار إلى العربية
+        button_box.button(QDialogButtonBox.Ok).setText("موافق")
+        button_box.button(QDialogButtonBox.Cancel).setText("إلغاء")
+        
+        layout.addWidget(button_box)
+
+    def validate_and_accept(self):
+        """التحقق من صحة البيانات قبل القبول"""
+        if not self.name.text().strip():
+            QMessageBox.warning(
+                self,
+                'خطأ في الإدخال',
+                'يجب إدخال اسم السائق على الأقل!',
+                QMessageBox.Ok
+            )
+            self.name.setFocus()  # تركيز على حقل الاسم
+            return
+        
+        # إذا تم إدخال الاسم، نقبل النموذج
+        self.accept()
+
     def get_driver_data(self):
         return {
             'name': self.name.text(),
@@ -778,7 +862,6 @@ class AddDriverDialog(QDialog):
             'age': self.age.text(),
             'national_id': self.national_id.text()
         }
-
 class AddTruckDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -814,12 +897,33 @@ class AddTruckDialog(QDialog):
         button_box.accepted.connect(self.accept)
         button_box.rejected.connect(self.reject)
         layout.addWidget(button_box)
+    
+    def accept(self):
+        # التحقق من رقم الشاحنة
+        if not self.truck_number.text().strip():
+            QMessageBox.warning(self, "تنبيه", "يجب إدخال رقم الشاحنة")
+            self.truck_number.setFocus()
+            return
+            
+        # التحقق من نوع الشاحنة
+        if not self.truck_type.text().strip():
+            QMessageBox.warning(self, "تنبيه", "يجب إدخال نوع الشاحنة")
+            self.truck_type.setFocus()
+            return
+            
+        # التحقق من موديل الشاحنة
+        if not self.model.text().strip():
+            QMessageBox.warning(self, "تنبيه", "يجب إدخال موديل الشاحنة")
+            self.model.setFocus()
+            return
+        
+        super().accept()
         
     def get_truck_data(self):
         return {
-            'truck_number': self.truck_number.text(),
-            'truck_type': self.truck_type.text(),
-            'model': self.model.text(),
+            'truck_number': self.truck_number.text().strip(),
+            'truck_type': self.truck_type.text().strip(),
+            'model': self.model.text().strip(),
             'ownership': self.ownership.currentText()
         }
 
@@ -831,9 +935,27 @@ class AddCompanyDialog(QDialog):
         self.setModal(True)
         self.resize(400, 300)
         self.setupUI()
+
+    def accept(self):
+        # التحقق من البيانات المطلوبة قبل الإضافة
+        if not self.company_name.text().strip():
+            QMessageBox.warning(self, "تنبيه", "يجب إدخال اسم الشركة")
+            self.company_name.setFocus()
+            return
+            
+        if not self.client_name.text().strip():
+            QMessageBox.warning(self, "تنبيه", "يجب إدخال اسم العميل")
+            self.client_name.setFocus()
+            return
+            
+        if not self.address.text().strip():
+            QMessageBox.warning(self, "تنبيه", "يجب إدخال عنوان الشركة")
+            self.address.setFocus()
+            return
+            
+        super().accept()        
         
     def setupUI(self):
-        
         layout = QVBoxLayout(self)
         form_group = QGroupBox("بيانات الشركة")
         form_layout = QGridLayout(form_group)
@@ -867,13 +989,17 @@ class AddCompanyDialog(QDialog):
         layout.addWidget(button_box)
         
     def get_company_data(self):
-        return {
-            'company_name': self.company_name.text(),
-            'country': self.country.currentText(),
-            'client_name': self.client_name.text(),
-            'deal_type': self.deal_type.currentText(),
-            'address': self.address.text()
-        }
+        try:
+            return {
+                'company_name': self.company_name.text(),
+                'country': self.country.currentText(),
+                'client_name': self.client_name.text(),
+                'deal_type': self.deal_type.currentText(),
+                'address': self.address.text()
+            }
+        except Exception as e:
+            QMessageBox.critical(self, "خطأ", f"حدث خطأ في معالجة البيانات: {str(e)}")
+            return None
 
 class AddExpenseDialog(QDialog):
     def __init__(self, trips, parent=None):
@@ -972,7 +1098,7 @@ class AddTripDialog(QDialog):
         self.countries = countries
         self.drivers_data = drivers_data
         self.parent_app = parent  # حفظ المرجع للتطبيق الرئيسي
-        self.setWindowTitle('إضافة رحلة جديدة')
+        self.setWindowTitle('إضافة شحنة جديدة')
         self.setModal(True)
         self.resize(500, 600)
         self.setupUI()
@@ -984,7 +1110,7 @@ class AddTripDialog(QDialog):
         
     def setupUI(self):
         layout = QVBoxLayout(self)
-        basic_group = QGroupBox("بيانات الرحلة الأساسية")
+        basic_group = QGroupBox("بيانات الشحنة الأساسية")
         basic_layout = QGridLayout(basic_group)
         
         self.shipment_number = QLineEdit()
@@ -1130,7 +1256,7 @@ class AddTripDialog(QDialog):
             QMessageBox.warning(self, 'خطأ', f'هذا السائق غير مسموح له بالسفر إلى {intermediate_country}!')
             return None
             
-        # إذا كل شيء صحيح، إرجاع بيانات الرحلة
+        # إذا كل شيء صحيح، إرجاع بيانات الشحنة
         return {
             'shipment_number': self.shipment_number.text(),
             'driver_name': driver_name,
@@ -1143,13 +1269,23 @@ class AddTripDialog(QDialog):
             'allowance_period': self.allowance_period.text(),
             'notes': self.notes.toPlainText()
         }
+    
+
 
 
 class ShipmentGalleryDialog(QDialog):
     def __init__(self, trips_data, parent=None):
         super().__init__(parent)
         self.trips_data = trips_data
-        self.data_file = "shipment_images.json"
+        self.parent_app = parent
+
+        self.db_file = {
+             "host": "localhost",
+            "user": "hany",
+            "password": "hany",
+            "database": "transport_db"
+        } 
+
         self.image_paths = self.load_image_data()
         self.setWindowTitle('معرض الشحنات')
         self.setModal(True)
@@ -1201,34 +1337,6 @@ class ShipmentGalleryDialog(QDialog):
                 item = QListWidgetItem(image_path)
                 self.images_list.addItem(item)
     
-    def add_image(self):
-        """إضافة صورة جديدة للشحنة"""
-        from PyQt5.QtWidgets import QFileDialog
-        
-        shipment_number = self.shipment_combo.currentText()
-        file_path, _ = QFileDialog.getOpenFileName(
-            self, 
-            "اختر صورة للشحنة", 
-            "", 
-            "ملفات الصور (*.png *.jpg *.jpeg *.bmp)"
-        )
-        
-        if file_path:
-            if shipment_number not in self.image_paths:
-                self.image_paths[shipment_number] = []
-                
-            self.image_paths[shipment_number].append(file_path)
-            self.load_shipment_images(shipment_number)
-    
-    def delete_image(self):
-        """حذف الصورة المحددة"""
-        current_item = self.images_list.currentItem()
-        if current_item:
-            shipment_number = self.shipment_combo.currentText()
-            if shipment_number in self.image_paths:
-                self.image_paths[shipment_number].remove(current_item.text())
-                self.load_shipment_images(shipment_number)
-    
     def view_image(self, item):
         """عرض الصورة المحددة"""
         from PyQt5.QtWidgets import QMessageBox
@@ -1257,28 +1365,158 @@ class ShipmentGalleryDialog(QDialog):
         except Exception as e:
             QMessageBox.critical(self, "خطأ", f"حدث خطأ أثناء عرض الصورة: {str(e)}")
     def load_image_data(self):
-        """تحميل بيانات الصور من ملف JSON"""
-        if os.path.exists(self.data_file):
-            with open(self.data_file, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        return {}
-    
+            """تحميل بيانات الصور من قاعدة البيانات"""
+            images_dict = {}
+            try:
+                conn = pymysql.connect(**self.db_file)
+                cursor = conn.cursor()
+                cursor.execute("SELECT shipment_number, image_path FROM shipment_images")
+                
+                for shipment_number, image_path in cursor.fetchall():
+                    if shipment_number not in images_dict:
+                        images_dict[shipment_number] = []
+                    if os.path.exists(image_path):  # التحقق من وجود الصورة
+                        images_dict[shipment_number].append(image_path)
+                
+                conn.close()
+            except Exception as e:
+                print(f"Error loading images: {str(e)}")
+                QMessageBox.warning(self, 'خطأ', f'حدث خطأ أثناء تحميل الصور: {str(e)}')
+            
+            return images_dict
+
     def save_image_data(self):
-        """حفظ بيانات الصور في ملف JSON"""
-        with open(self.data_file, 'w', encoding='utf-8') as f:
-            json.dump(self.image_paths, f, ensure_ascii=False, indent=4)
+        """حفظ بيانات الصور في قاعدة البيانات"""
+        try:
+            conn = pymysql.connect(**self.db_file)
+            cursor = conn.cursor()
+            
+            # حذف جميع الصور القديمة
+            cursor.execute("DELETE FROM shipment_images")
+            
+            # إدراج الصور الجديدة
+            for shipment_number, paths in self.image_paths.items():
+                for path in paths:
+                    cursor.execute(
+                        "INSERT INTO shipment_images (shipment_number, image_path) VALUES (%s, %s)",
+                        (shipment_number, path)
+                    )
+            
+            conn.commit()
+            conn.close()
+            
+        except Exception as e:
+            print(f"Error saving images: {str(e)}")
+            QMessageBox.critical(self, 'خطأ', f'حدث خطأ أثناء حفظ الصور: {str(e)}')
     
+   
+
+    def add_image(self):
+        """إضافة صورة جديدة للشحنة"""
+        shipment_number = self.shipment_combo.currentText()
+        try:
+            # فتح نافذة اختيار الملف
+            file_path, _ = QFileDialog.getOpenFileName(
+                self, 
+                "اختر صورة للشحنة", 
+                "", 
+                "ملفات الصور (*.png *.jpg *.jpeg *.bmp)"
+            )
+            
+            if file_path:
+                # نسخ الصورة إلى مجلد الصور الخاص بالتطبيق
+                app_images_dir = os.path.join(os.path.dirname(self.db_file), "shipment_images")
+                os.makedirs(app_images_dir, exist_ok=True)
+                
+                # إنشاء اسم فريد للصورة
+                file_ext = os.path.splitext(file_path)[1]
+                new_filename = f"{shipment_number}_{datetime.now().strftime('%Y%m%d_%H%M%S')}{file_ext}"
+                new_path = os.path.join(app_images_dir, new_filename)
+                
+                # نسخ الصورة
+                import shutil
+                shutil.copy2(file_path, new_path)
+                
+                # إضافة مسار الصورة الجديد
+                if shipment_number not in self.image_paths:
+                    self.image_paths[shipment_number] = []
+                self.image_paths[shipment_number].append(new_path)
+                
+                # تحديث قاعدة البيانات
+                self.save_image_data()
+                
+                # تحديث العرض
+                self.load_shipment_images(shipment_number)
+                
+        except Exception as e:
+            print(f"Error adding image: {str(e)}")
+            QMessageBox.critical(self, 'خطأ', f'حدث خطأ أثناء إضافة الصورة: {str(e)}')
+
+    def delete_image(self):
+        """حذف الصورة المحددة"""
+        try:
+            current_item = self.images_list.currentItem()
+            if current_item:
+                shipment_number = self.shipment_combo.currentText()
+                image_path = current_item.text()
+                
+                reply = QMessageBox.question(
+                    self, 
+                    'تأكيد الحذف',
+                    'هل أنت متأكد من حذف هذه الصورة؟',
+                    QMessageBox.Yes | QMessageBox.No
+                )
+                
+                if reply == QMessageBox.Yes:
+                    # حذف الملف
+                    if os.path.exists(image_path):
+                        os.remove(image_path)
+                    
+                    # حذف من القائمة
+                    self.image_paths[shipment_number].remove(image_path)
+                    if not self.image_paths[shipment_number]:
+                        del self.image_paths[shipment_number]
+                    
+                    # تحديث قاعدة البيانات
+                    self.save_image_data()
+                    
+                    # تحديث العرض
+                    self.load_shipment_images(shipment_number)
+                    
+        except Exception as e:
+            print(f"Error deleting image: {str(e)}")
+            QMessageBox.critical(self, 'خطأ', f'حدث خطأ أثناء حذف الصورة: {str(e)}')
+
     def accept(self):
-        """حفظ البيانات عند إغلاق النافذة"""
+        """حفظ التغييرات عند إغلاق النافذة"""
         self.save_image_data()
         super().accept()
-import sqlite3
-import json
+
+def resource_path(relative_path):
+    """ Get absolute path to resource, works for dev and for PyInstaller """
+    try:
+        # PyInstaller creates a temp folder and stores path in _MEIPASS
+        base_path = sys._MEIPASS
+    except Exception:
+        base_path = os.path.abspath(".")
+    return os.path.join(base_path, relative_path)
 
 class ShippingManagementApp(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.db_file = "shipping_management.db"
+        icon_path = resource_path('logo.ico')
+        if os.path.exists(icon_path):
+            self.setWindowIcon(QIcon(icon_path))
+
+        self.db_file = {
+             "host": "localhost",
+            "user": "hany",
+            "password": "hany",
+            "database": "transport_db"
+        } 
+        self.images_dir = resource_path("shipment_images")
+        os.makedirs(self.images_dir, exist_ok=True)
+        
         self.init_database()
         self.current_user = None
         self.countries_data = self.load_countries_data()
@@ -1292,12 +1530,18 @@ class ShippingManagementApp(QMainWindow):
 
     def init_database(self):
         """Initialize the SQLite database and create tables if they don't exist."""
-        conn = sqlite3.connect(self.db_file)
-        conn.commit()
-        conn.close()
+        self.db_file = {
+        "host": "localhost",
+        "user": "hany",
+        "password": "hany",
+        "database": "transport_db"
+    }
+        conn = pymysql.connect(**self.db_file)
+        
+
     def load_users(self):
         """Load users from the database."""
-        conn = sqlite3.connect(self.db_file)
+        conn = pymysql.connect(**self.db_file)
         cursor = conn.cursor()
         cursor.execute("SELECT username, password, type, permissions FROM users")
         users = [
@@ -1316,26 +1560,12 @@ class ShippingManagementApp(QMainWindow):
         """تحميل بيانات الدول من قاعدة البيانات"""
         try:
             print("جاري تحميل بيانات الدول من قاعدة البيانات...")  # رسالة debug
-            conn = sqlite3.connect(self.db_file)
+            conn = pymysql.connect(**self.db_file)
             cursor = conn.cursor()
             
             # التحقق من وجود الجدول
-            cursor.execute("""
-                SELECT name FROM sqlite_master 
-                WHERE type='table' AND name='countries'
-            """)
+            cursor.execute("SHOW TABLES LIKE %s", ("countries",))
             table_exists = cursor.fetchone()
-            
-            if not table_exists:
-                print("جدول الدول غير موجود، جاري إنشاؤه...")  # رسالة debug
-                cursor.execute("""
-                    CREATE TABLE countries (
-                        name TEXT PRIMARY KEY,
-                        allowed_drivers TEXT
-                    )
-                """)
-                conn.commit()
-                return []
             
             cursor.execute("SELECT name, allowed_drivers FROM countries")
             countries = []
@@ -1369,7 +1599,7 @@ class ShippingManagementApp(QMainWindow):
 
     def load_drivers_data(self):
         """Load drivers data from the database."""
-        conn = sqlite3.connect(self.db_file)
+        conn = pymysql.connect(**self.db_file)
         cursor = conn.cursor()
         cursor.execute("SELECT name, address, age, national_id FROM drivers")
         drivers = [
@@ -1386,7 +1616,7 @@ class ShippingManagementApp(QMainWindow):
 
     def load_trucks_data(self):
         """Load trucks data from the database."""
-        conn = sqlite3.connect(self.db_file)
+        conn = pymysql.connect(**self.db_file)
         cursor = conn.cursor()
         cursor.execute("SELECT truck_number, truck_type, model, ownership FROM trucks")
         trucks = [
@@ -1403,7 +1633,7 @@ class ShippingManagementApp(QMainWindow):
 
     def load_companies_data(self):
         """Load companies data from the database."""
-        conn = sqlite3.connect(self.db_file)
+        conn = pymysql.connect(**self.db_file)
         cursor = conn.cursor()
         cursor.execute("SELECT company_name, country, client_name, deal_type, address FROM companies")
         companies = [
@@ -1421,7 +1651,7 @@ class ShippingManagementApp(QMainWindow):
 
     def load_trips_data(self):
         """Load trips data from the database."""
-        conn = sqlite3.connect(self.db_file)
+        conn = pymysql.connect(**self.db_file)
         cursor = conn.cursor()
         cursor.execute("SELECT shipment_number, driver_name, shipment_type, shipment_date, start, final_destination, intermediate_country, shipment_status, allowance_period, notes FROM trips")
         trips = [
@@ -1444,7 +1674,7 @@ class ShippingManagementApp(QMainWindow):
 
     def load_expenses_data(self):
         """Load expenses data from the database."""
-        conn = sqlite3.connect(self.db_file)
+        conn = pymysql.connect(**self.db_file)
         cursor = conn.cursor()
         cursor.execute("SELECT shipment_number, fuel_cost, oil_cost, maintenance_cost, army_card_cost, rental_cost, driver_salary, delay_fine, transport_cost FROM expenses")
         expenses = [
@@ -1464,13 +1694,7 @@ class ShippingManagementApp(QMainWindow):
         conn.close()
         return expenses
         
-    def show_login(self):
-        login_dialog = LoginDialog(self)
-        if login_dialog.exec_() == QDialog.Accepted:
-            self.current_user = login_dialog.current_user
-            self.initUI()
-        else:
-            sys.exit()
+    
         
     def initUI(self):
         self.setWindowTitle('إدارة شركة النقل الثقيل')
@@ -1543,7 +1767,7 @@ class ShippingManagementApp(QMainWindow):
         sidebar_layout.addWidget(title_label)
         
         menu_buttons = [
-            ("🚛 الرحلات", "trips_btn", self.show_trips, 'trips'),
+            ("🚛 الشحنات", "trips_btn", self.show_trips, 'trips'),
             ("👥 السائقين", "drivers_btn", self.show_drivers, 'drivers'),
             ("🌍 إدارة الدول", "countries_btn", self.manage_countries, 'countries'),
             ("🚚 الشاحنات", "trucks_btn", self.show_trucks, 'trucks'),
@@ -1597,13 +1821,49 @@ class ShippingManagementApp(QMainWindow):
         
         
     def logout(self):
-        self.clear_main_content()
-        if self.centralWidget():
-            self.centralWidget().deleteLater()
-        self.setCentralWidget(None)
-        self.current_user = None
-        self.hide()
-        self.show_login()
+        try:
+            print("Logging out...")  # للتتبع
+            self.clear_main_content()
+            self.current_user = None
+            self.hide()
+            
+            # إعادة تهيئة البيانات
+            self.countries_data = self.load_countries_data()
+            self.countries = [c['name'] for c in self.countries_data]
+            self.trips_data = self.load_trips_data()
+            self.drivers_data = self.load_drivers_data()
+            self.trucks_data = self.load_trucks_data()
+            self.companies_data = self.load_companies_data()
+            self.expenses_data = self.load_expenses_data()
+            
+            self.show_login()
+            
+        except Exception as e:
+            print(f"Error during logout: {str(e)}")
+            QMessageBox.critical(self, 'خطأ', f'حدث خطأ أثناء تسجيل الخروج: {str(e)}')
+
+    def show_login(self):
+        try:
+            print("Showing login dialog...")  # للتتبع
+            login_dialog = LoginDialog(self)
+            result = login_dialog.exec_()
+            
+            if result == QDialog.Accepted:
+                print("Login accepted, initializing UI...")  # للتتبع
+                self.current_user = login_dialog.current_user
+                # إعادة إنشاء واجهة المستخدم
+                if self.centralWidget():
+                    self.centralWidget().deleteLater()
+                self.initUI()
+                self.show()
+            else:
+                print("Login rejected, closing application...")  # للتتبع
+                self.close()  # استخدام close() بدلاً من sys.exit()
+                
+        except Exception as e:
+            print(f"Error during login: {str(e)}")
+            QMessageBox.critical(self, 'خطأ', f'حدث خطأ أثناء تسجيل الدخول: {str(e)}')
+            self.close()
         
     def create_trips_content(self):
         widget = QWidget()
@@ -1625,7 +1885,7 @@ class ShippingManagementApp(QMainWindow):
         layout.addLayout(header_layout)
         
         toolbar_layout = QHBoxLayout()
-        trips_title = QLabel("الرحلات الحالية")
+        trips_title = QLabel("الشحنات الحالية")
         trips_title.setStyleSheet("""
             QLabel {
                 font-size: 24px;
@@ -1653,7 +1913,7 @@ class ShippingManagementApp(QMainWindow):
         toolbar_layout.addWidget(QLabel("التصنيف:"))
         toolbar_layout.addWidget(self.trips_filter)
         
-        add_trip_btn = QPushButton("إضافة رحلة جديدة")
+        add_trip_btn = QPushButton("إضافة شحنة جديدة")
         add_trip_btn.clicked.connect(self.add_new_trip)
         add_trip_btn.setStyleSheet("""
             QPushButton {
@@ -1670,7 +1930,7 @@ class ShippingManagementApp(QMainWindow):
         """)
         toolbar_layout.addWidget(add_trip_btn)
         
-        edit_trip_btn = QPushButton("تعديل الرحلة")
+        edit_trip_btn = QPushButton("تعديل الشحنة")
         edit_trip_btn.clicked.connect(self.edit_trip)
         edit_trip_btn.setStyleSheet("""
             QPushButton {
@@ -1687,7 +1947,7 @@ class ShippingManagementApp(QMainWindow):
         """)
         toolbar_layout.addWidget(edit_trip_btn)
         
-        delete_trip_btn = QPushButton("حذف الرحلة")
+        delete_trip_btn = QPushButton("حذف الشحنة")
         delete_trip_btn.clicked.connect(self.delete_trip)
         delete_trip_btn.setStyleSheet("""
             QPushButton {
@@ -2639,10 +2899,6 @@ class ShippingManagementApp(QMainWindow):
     def print_reports_table(self):
         """Print the reports table"""
         try:
-            from PyQt5.QtPrintSupport import QPrinter, QPrintDialog
-            from PyQt5.QtGui import QPainter
-            from PyQt5.QtCore import QRect
-            
             printer = QPrinter()
             dialog = QPrintDialog(printer, self)
             
@@ -2667,11 +2923,7 @@ class ShippingManagementApp(QMainWindow):
    ###
     def export_reports_to_excel(self):
         """Export reports table to Excel file"""
-        try:
-            from PyQt5.QtWidgets import QFileDialog, QMessageBox
-            import openpyxl
-            from openpyxl.styles import Font, PatternFill, Alignment
-            
+        try:   
             if not hasattr(self, 'reports_table') or self.reports_table is None:
                 QMessageBox.warning(self, "تحذير", "لا يوجد جدول تقارير للتصدير")
                 return
@@ -2799,10 +3051,6 @@ class ShippingManagementApp(QMainWindow):
     def export_table_to_excel_openpyxl(self, table, filename):
         """Export table data to Excel using openpyxl directly with reversed column order for Arabic"""
         try:
-            import openpyxl
-            from openpyxl.styles import Font, PatternFill, Alignment
-            from PyQt5.QtWidgets import QMessageBox
-            
             # Create workbook and worksheet
             wb = openpyxl.Workbook()
             ws = wb.active
@@ -2856,7 +3104,7 @@ class ShippingManagementApp(QMainWindow):
             QMessageBox.critical(self, "خطأ في التصدير", f"حدث خطأ أثناء التصدير: {str(e)}")
         
     def print_trips_table(self):
-        self.print_table(self.trips_table, "الرحلات الحالية")
+        self.print_table(self.trips_table, "الشحنات الحالية")
     
     def print_drivers_table(self):
         self.print_table(self.drivers_table, "السائقين الحاليين")
@@ -2875,9 +3123,7 @@ class ShippingManagementApp(QMainWindow):
     
     def export_trips_to_excel(self):
         """Export trips table to Excel"""
-        try:
-            from PyQt5.QtWidgets import QFileDialog
-            
+        try:            
             file_path, _ = QFileDialog.getSaveFileName(
                 self, 
                 "حفظ بيانات الشحنات", 
@@ -2894,9 +3140,7 @@ class ShippingManagementApp(QMainWindow):
     
     def export_drivers_to_excel(self):
         """Export drivers table to Excel with reversed column order"""
-        try:
-            from PyQt5.QtWidgets import QFileDialog
-            
+        try:            
             file_path, _ = QFileDialog.getSaveFileName(
                 self, 
                 "حفظ بيانات السائقين", 
@@ -2913,7 +3157,6 @@ class ShippingManagementApp(QMainWindow):
     def export_trucks_to_excel(self):
         """Export trucks table to Excel with reversed column order"""
         try:
-            from PyQt5.QtWidgets import QFileDialog
             
             file_path, _ = QFileDialog.getSaveFileName(
                 self, 
@@ -2931,7 +3174,6 @@ class ShippingManagementApp(QMainWindow):
     def export_companies_to_excel(self):
         """Export companies table to Excel with reversed column order"""
         try:
-            from PyQt5.QtWidgets import QFileDialog
             
             file_path, _ = QFileDialog.getSaveFileName(
                 self, 
@@ -2949,7 +3191,6 @@ class ShippingManagementApp(QMainWindow):
     def export_expenses_to_excel(self):
         """Export expenses table to Excel with reversed column order"""
         try:
-            from PyQt5.QtWidgets import QFileDialog
             
             file_path, _ = QFileDialog.getSaveFileName(
                 self, 
@@ -3014,13 +3255,18 @@ class ShippingManagementApp(QMainWindow):
         try:
             self.clear_main_content()
             if self.current_user['type'] == 'Admin':
-                dialog = UserManagementDialog(self.users, self)
+                # تحميل المستخدمين من قاعدة البيانات أولاً
+                users = self.load_users()  # استخدام الدالة الموجودة بالفعل
+                dialog = UserManagementDialog(users, self)
+                dialog.db_file = self.db_file  # تمرير مسار قاعدة البيانات
                 if dialog.exec_() == QDialog.Accepted:
                     self.update_all_tables()
             else:
-                self.main_content_layout.addWidget(QLabel("غير مسموح لك بالوصول إلى إعدادات المستخدمين!"))
+                QMessageBox.warning(self, 'خطأ', 'غير مسموح لك بالوصول إلى إعدادات المستخدمين!')
+                
         except Exception as e:
-            print(e)
+            print(f"خطأ في فتح الإعدادات: {str(e)}")
+            QMessageBox.critical(self, 'خطأ', f'حدث خطأ أثناء فتح الإعدادات: {str(e)}')
     
     def update_all_tables(self):
         if hasattr(self, 'trips_table'):
@@ -3039,8 +3285,8 @@ class ShippingManagementApp(QMainWindow):
 
     
     def save_trips_data(self):
-        """حفظ بيانات الرحلات في قاعدة البيانات"""
-        conn = sqlite3.connect(self.db_file)
+        """حفظ بيانات الشحنات في قاعدة البيانات"""
+        conn = pymysql.connect(**self.db_file)
         cursor = conn.cursor()
         
         # حذف جميع البيانات القديمة
@@ -3053,7 +3299,7 @@ class ShippingManagementApp(QMainWindow):
                 (shipment_number, driver_name, shipment_type, shipment_date, 
                 start, final_destination, intermediate_country, 
                 shipment_status, allowance_period, notes)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
                 (trip['shipment_number'], trip['driver_name'], trip['shipment_type'],
                 trip['shipment_date'], trip['start'], trip['final_destination'],
                 trip['intermediate_country'], trip['shipment_status'],
@@ -3071,7 +3317,7 @@ class ShippingManagementApp(QMainWindow):
                 self.trips_data.append(trip_data)
                 self.save_trips_data()  # حفظ في قاعدة البيانات
                 self.update_trips_table()
-                QMessageBox.information(self, 'نجح', 'تم إضافة الرحلة بنجاح!')
+                QMessageBox.information(self, 'نجح', 'تم إضافة الشحنة بنجاح!')
 
     def edit_trip(self):
         selected_row = self.trips_table.currentRow()
@@ -3095,22 +3341,40 @@ class ShippingManagementApp(QMainWindow):
                     self.trips_data[selected_row] = new_trip_data
                     self.save_trips_data()  # حفظ في قاعدة البيانات
                     self.update_trips_table()
-                    QMessageBox.information(self, 'نجح', 'تم تعديل الرحلة بنجاح!')
+                    QMessageBox.information(self, 'نجح', 'تم تعديل الشحنة بنجاح!')
 
     def delete_trip(self):
         selected_row = self.trips_table.currentRow()
         if selected_row >= 0:
-            reply = QMessageBox.question(self, 'تأكيد الحذف', 'هل تريد حذف هذه الرحلة؟')
+            shipment_number = self.trips_data[selected_row]['shipment_number']
+            reply = QMessageBox.question(self, 'تأكيد الحذف', 'هل تريد حذف هذه الشحنة وصورها؟')
             if reply == QMessageBox.Yes:
-                del self.trips_data[selected_row]
-                self.save_trips_data()  # حفظ في قاعدة البيانات
-                self.update_trips_table()
-                QMessageBox.information(self, 'نجح', 'تم حذف الرحلة بنجاح!')
+                try:
+                    # حذف الصور المرتبطة
+                    conn = pymysql.connect(**self.db_file)
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT image_path FROM shipment_images WHERE shipment_number = %s", (shipment_number,))
+                    for (image_path,) in cursor.fetchall():
+                        if os.path.exists(image_path):
+                            os.remove(image_path)
+                    cursor.execute("DELETE FROM shipment_images WHERE shipment_number = %s", (shipment_number,))
+                    conn.commit()
+                    conn.close()
+
+                    # حذف الشحنة
+                    del self.trips_data[selected_row]
+                    self.save_trips_data()
+                    self.update_trips_table()
+                    QMessageBox.information(self, 'نجح', 'تم حذف الشحنة وصورها بنجاح!')
+                    
+                except Exception as e:
+                    print(f"Error deleting trip and images: {str(e)}")
+                    QMessageBox.critical(self, 'خطأ', f'حدث خطأ أثناء حذف الشحنة: {str(e)}')
         
 
     def save_drivers_data(self):
         """Save drivers data to the database"""
-        conn = sqlite3.connect(self.db_file)
+        conn = pymysql.connect(**self.db_file)
         cursor = conn.cursor()
         
         # Delete all existing drivers
@@ -3119,7 +3383,7 @@ class ShippingManagementApp(QMainWindow):
         # Insert current drivers
         for driver in self.drivers_data:
             cursor.execute(
-                "INSERT INTO drivers (name, address, age, national_id) VALUES (?, ?, ?, ?)",
+                "INSERT INTO drivers (name, address, age, national_id) VALUES (%s, %s, %s, %s)",
                 (driver['name'], driver['address'], int(driver['age']) if driver['age'] else None, driver['national_id'])
             )
         
@@ -3163,14 +3427,14 @@ class ShippingManagementApp(QMainWindow):
     
     def save_trucks_data(self):
         """حفظ بيانات الشاحنات في قاعدة البيانات"""
-        conn = sqlite3.connect(self.db_file)
+        conn = pymysql.connect(**self.db_file)
         cursor = conn.cursor()
         
         cursor.execute("DELETE FROM trucks")
         
         for truck in self.trucks_data:
             cursor.execute(
-                "INSERT INTO trucks (truck_number, truck_type, model, ownership) VALUES (?, ?, ?, ?)",
+                "INSERT INTO trucks (truck_number, truck_type, model, ownership) VALUES (%s, %s, %s, %s)",
                 (truck['truck_number'], truck['truck_type'], 
                 truck['model'], truck['ownership'])
             )
@@ -3217,7 +3481,7 @@ class ShippingManagementApp(QMainWindow):
         
     def save_companies_data(self):
         """حفظ بيانات الشركات في قاعدة البيانات"""
-        conn = sqlite3.connect(self.db_file)
+        conn = pymysql.connect(**self.db_file)
         cursor = conn.cursor()
         
         cursor.execute("DELETE FROM companies")
@@ -3226,7 +3490,7 @@ class ShippingManagementApp(QMainWindow):
             cursor.execute(
                 """INSERT INTO companies 
                 (company_name, country, client_name, deal_type, address)
-                VALUES (?, ?, ?, ?, ?)""",
+                VALUES (%s, %s, %s, %s, %s)""",
                 (company['company_name'], company['country'], 
                 company['client_name'], company['deal_type'], 
                 company['address'])
@@ -3275,7 +3539,7 @@ class ShippingManagementApp(QMainWindow):
     
     def save_expenses_data(self):
         """حفظ بيانات المصاريف في قاعدة البيانات"""
-        conn = sqlite3.connect(self.db_file)
+        conn = pymysql.connect(**self.db_file)
         cursor = conn.cursor()
         
         cursor.execute("DELETE FROM expenses")
@@ -3285,7 +3549,7 @@ class ShippingManagementApp(QMainWindow):
                 """INSERT INTO expenses 
                 (shipment_number, fuel_cost, oil_cost, maintenance_cost, 
                 army_card_cost, rental_cost, driver_salary, delay_fine, transport_cost)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
                 (expense['shipment_number'], 
                 float(expense['fuel_cost']), float(expense['oil_cost']),
                 float(expense['maintenance_cost']), float(expense['army_card_cost']),
@@ -3298,7 +3562,7 @@ class ShippingManagementApp(QMainWindow):
 
     def add_new_expense(self):
         if not self.trips_data:
-            QMessageBox.warning(self, 'خطأ', 'يرجى إضافة رحلة أولاً!')
+            QMessageBox.warning(self, 'خطأ', 'يرجى إضافة شحنة أولاً!')
             return
             
         dialog = AddExpenseDialog(self.trips_data, self)
